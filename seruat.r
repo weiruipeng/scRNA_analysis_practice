@@ -1,5 +1,8 @@
-
-
+library(Seurat)
+library(tidyverse)
+library(SingleCellExperiment)
+library(Matrix)
+library(scales)
 
 
 # refer to https://github.com/hbctraining/scRNA-seq/blob/master/lessons
@@ -18,15 +21,18 @@ seruat_obj$mitoRatio <- PercentageFeatureSet(object = seruat_obj, pattern = "^MT
 seruat_obj$mitoRatio <- seruat_obj@meta.data$mitoRatio/100
 
 phenotype=read.csv("../SRR_pheotype.csv")
+metadata$sample="MCI/AD"
+metadata$seq_folder=as.character(metadata$seq_folder)
 for(i in 1:nrow(metadata)){
         for(j in 1:nrow(phenotype)){
-                if(metadata$seq_folder[i]==phenotype$RUN_ID[j]){metadata$sample[i]=phenotype$status[j]
+                if(substr(metadata$seq_folder[i],12,23)==phenotype$RUN_ID[j]){metadata$sample[i]=phenotype$status[j]
                         }
                 }
         }
 
 seruat_obj@meta.data=metadata
-save(seruat_obj,"seruat_obj.RDS")
+#save(seruat_obj,"seruat_obj.RDS")
+
 
 # histogram for ctrl count vs. ADI/DD count
 pdf("Ncells.pdf")
@@ -47,7 +53,7 @@ geom_density(alpha = 0.2) +
 scale_x_log10() + 
 theme_classic() +
 ylab("log10 Cell density") +
-geom_vline(xintercept = 500)
+geom_vline(xintercept = 3000)
 dev.off()
 
 
@@ -93,5 +99,77 @@ metadata %>%
         ggplot(aes(x=log10GenesPerUMI, color = sample, fill=sample)) +
         geom_density(alpha = 0.2) +
         theme_classic() +
-        geom_vline(xintercept = 0.8)
+        geom_vline(xintercept = 1.1) +
+        geom_vline(xintercept = 1.2)
 dev.off()
+
+
+# Filter out low quality reads using selected thresholds - these will change with experiment
+filtered_seurat <- subset(x = seruat_obj, 
+                         subset= (nUMI >= 3000) & 
+                           (nGene >= 1200) & 
+                           (log10GenesPerUMI > 1.1 & log10GenesPerUMI < 1.2) & 
+                           (mitoRatio < 0.10))
+
+# Output a logical vector for every gene on whether the more than zero counts per cell
+# Extract counts
+counts <- GetAssayData(object = filtered_seurat, slot = "counts")
+
+# Output a logical vector for every gene on whether the more than zero counts per cell
+nonzero <- counts > 0
+
+# Sums all TRUE values and returns TRUE if more than 10 TRUE values per gene
+keep_genes <- Matrix::rowSums(nonzero) >= 10
+
+# Only keeping those genes expressed in more than 10 cells
+filtered_counts <- counts[keep_genes, ]
+
+# Reassign to filtered Seurat object
+filtered_seurat <- CreateSeuratObject(filtered_counts, meta.data = filtered_seurat@meta.data)
+
+
+seurat_phase <- NormalizeData(filtered_seurat)
+
+# A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat.
+# We can segregate this list into markers of G2/M phase and markers of S phase
+s.gene=cc.genes$s.genes
+g2m.gene=cc.genes$g2m.genes
+
+seurat_phase <- CellCycleScoring(seurat_phase, 
+                                 g2m.features = g2m.gene, 
+                                 s.features = s.gene)
+
+# Identify the most variable genes
+seurat_phase <- FindVariableFeatures(seurat_phase, 
+                                     selection.method = "vst",
+                                     nfeatures = 2000, 
+                                     verbose = FALSE)
+
+# Scale the counts
+seurat_phase <- ScaleData(seurat_phase)
+
+# PCA plot based on cell cycle feature genes
+pdf("cell_cycle_PCA.pdf")
+DimPlot(seurat_phase,
+        reduction = "pca",
+        group.by= "Phase",
+        split.by = "Phase")dev.off
+dev.off()
+
+options(future.globals.maxSize = 4000 * 1024^2)
+
+# Split seurat object by condition to perform cell cycle scoring and SCT on all samples
+split_seurat <- SplitObject(filtered_seurat, split.by = "sample")
+
+split_seurat <- split_seurat[c("ctrl", "stim")]
+
+for (i in 1:length(split_seurat)) {
+  split_seurat[[i]] <- NormalizeData(split_seurat[[i]], verbose = TRUE)
+  split_seurat[[i]] <- CellCycleScoring(split_seurat[[i]], g2m.features=g2m.gene, s.features=s.gene)
+  split_seurat[[i]] <- SCTransform(split_seurat[[i]], vars.to.regress = c("mitoRatio"))
+}
+
+# Check which assays are stored in objects
+split_seurat$ctrl@assays
+
+
