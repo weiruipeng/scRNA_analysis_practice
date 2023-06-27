@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --mail-user=weir@ccf.org 
+#SBATCH --mail-user=xxxx 
 #SBATCH --nodes=1
 #SBATCH --cpus-per-task=11
 #SBATCH --time=100:30:00
